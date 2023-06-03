@@ -16,6 +16,8 @@ def sair(conexao):
 def dados_recebidos(conexao, dados):
     if dados == b'':
         return sair(conexao)
+    if dados.split(b' ', 1)[0] == b'PING':
+        conexao.enviar(b':server PONG server :' + dados.split(b' ', 1)[1])
     print(conexao, dados)
 
 
