@@ -3,29 +3,139 @@ import asyncio
 from tcp import Servidor
 import re
 
+class Mensagem:
+    def __init__(self, conteudo):
+        self.conteudo = conteudo
+
+    def verifica_mensagem(dados):
+        corpo = dados.split(b' ', 1)
+        gatilho = corpo[0]
+        conteudo = corpo[1].rstrip(b'\r')
+
+        if gatilho == b'PING':
+            return Ping(conteudo)
+        elif gatilho == b'NICK':
+            return Nick(conteudo)
+        elif gatilho == b'PRIVMSG':
+            return Privmsg(conteudo)
+        elif gatilho == b'JOIN':
+            return Join(conteudo)
+        elif gatilho == b'PART':
+            return Part(conteudo)
+        else:
+            raise RuntimeError("Operacao nao reconhecida")
+
+    def tratador(self, conexao):
+        pass
+
+class Ping(Mensagem):
+    def tratador(self, conexao):
+        conteudo = self.conteudo
+        resposta = b':server PONG server :' + conteudo
+        conexao.enviar(resposta)
+
+class Nick(Mensagem):
+    def tratador(self, conexao):
+        respostas = []
+        apelido = self.conteudo
+        if validar_nome(apelido):
+            apelido_atual = servidor.get_apelido(conexao)
+            if servidor.apelido_em_uso(apelido):
+                respostas.append(b':server 433 ' + apelido_atual + b' ' + apelido + b' :Nickname is already in use')
+            elif servidor.conexao_apelidada(conexao):
+                apelido_antigo = apelido_atual
+                servidor.apelidar_conexao(conexao, apelido)
+                respostas.append(b':' + apelido_antigo + b' NICK ' + apelido)
+            else:
+                servidor.apelidar_conexao(conexao, apelido)
+                respostas.append(b':server 001 ' + apelido + b' :Welcome')
+                respostas.append(b':server 422 ' + apelido + b' :MOTD File is missing')
+        else:
+            respostas.append(b':server 432 * ' + apelido + b' :Erroneous nickname')
+
+        for resposta in respostas:
+            conexao.enviar(resposta)
+
+
+class Privmsg(Mensagem):
+    def tratador(self, conexao):
+        partes = self.conteudo.split(b' ', 1)
+        destinatario = partes[0]
+        conteudo = partes[1]
+        remetente = servidor.get_apelido(conexao)
+        mensagem = b':' + remetente + b' PRIVMSG ' + destinatario + b' ' + conteudo
+
+        if nome_de_canal(destinatario):
+            canal = destinatario
+            servidor.transmitir_exceto(canal, mensagem, conexao)
+        else:
+            destinatario = servidor.get_conexao(destinatario)
+            if destinatario is not None:
+                destinatario.enviar(mensagem)
+
+class Join(Mensagem):
+    def tratador(self, conexao):
+        if validar_nome_canal(self.conteudo):
+            canal = self.conteudo
+            apelido = servidor.get_apelido(conexao)
+            servidor.ligar_conexao_a_canal(canal, conexao)
+            servidor.transmitir_exceto(canal, b':' + apelido + b' JOIN :' + canal)
+            
+            resposta = b':server 353 ' + apelido + b' = ' + canal + b' :'
+            servidor.get_apelidos_das_conexoes_do_canal(canal)
+            apelidos_conexoes = list(servidor.get_apelidos_das_conexoes_do_canal(canal))
+            apelidos_conexoes.sort()
+            for ap in apelidos_conexoes:
+                resposta += ap + b' '
+            resposta = resposta.rstrip(b' ')
+            conexao.enviar(resposta)
+            conexao.enviar(b':server 366 ' + apelido + b' '  + canal + b' :End of /NAMES list.')
+class Part(Mensagem):
+    def tratador(self, conexao):
+        corpo_util = self.conteudo.split(b' ', 1)[0]
+        if validar_nome_canal(corpo_util):
+            canal = corpo_util
+            apelido = servidor.get_apelido(conexao)
+            servidor.transmitir_exceto(canal, b':' + apelido + b' PART ' + canal)
+            servidor.desligar_conexao_de_canal(canal, conexao)
+
+def nome_de_canal(nome):
+    return nome[0] == 35 
+
+def validar_nome_canal(nome):
+    return validar_nome(nome.lstrip(b'#')) and nome_de_canal(nome) 
 
 def validar_nome(nome):
     return re.match(br'^[a-zA-Z][a-zA-Z0-9_-]*$', nome) is not None
 
 
 def sair(conexao):
-    print(conexao, 'conexão fechada')
+    apelido = servidor.get_apelido(conexao)
+    canais = servidor.get_canais().items()
+    for canal, conexoes in canais:
+        if conexao in conexoes:
+            servidor.desligar_conexao_de_canal(canal, conexao)
+            servidor.transmitir_exceto(canal, b':' + apelido + b' QUIT :Connection closed')
+    servidor.liberar_apelido(apelido)
     conexao.fechar()
 
 
 def dados_recebidos(conexao, dados):
     if dados == b'':
         return sair(conexao)
-    if dados.split(b' ', 1)[0] == b'PING':
-        conexao.enviar(b':server PONG server :' + dados.split(b' ', 1)[1])
-    print(conexao, dados)
 
+    linhas = dados.split(b'\n')
+    linhas[0] = conexao.residuo + linhas[0] 
+    conexao.residuo = linhas.pop()
+
+    for linha in linhas:
+        msg = Mensagem.verifica_mensagem(linha)
+        msg.tratador(conexao)
 
 def conexao_aceita(conexao):
-    print(conexao, 'nova conexão')
     conexao.registrar_recebedor(dados_recebidos)
 
-
+ 
 servidor = Servidor(6667)
 servidor.registrar_monitor_de_conexoes_aceitas(conexao_aceita)
 asyncio.get_event_loop().run_forever()
